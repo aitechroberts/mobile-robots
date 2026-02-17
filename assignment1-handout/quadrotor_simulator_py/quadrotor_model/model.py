@@ -325,7 +325,12 @@ class QuadrotorModel:
         uRPM = np.reshape(self.model_params.uRPM, (4,))
         drpm = kmotor * (uRPM - rpms)
 
-        F, M = self.calculate_force_and_torque_from_rpm(rpms)
+        if self.enable_rotor_inertia:
+            rpms_for_force = rpms
+        else:
+            rpms_for_force = uRPM
+
+        F, M = self.calculate_force_and_torque_from_rpm(rpms_for_force)
 
         Fdes = np.array([[0], [0], [F]])
 

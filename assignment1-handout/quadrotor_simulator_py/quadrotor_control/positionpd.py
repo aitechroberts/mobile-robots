@@ -73,9 +73,9 @@ class QuadrotorPositionControllerPD:
             u: scalar value representing body-frame z-acceleration
         """
 
-        # TODO: Assignment 1, Problem 2.1
-
-        return [0]
+        e3 = np.array([[0], [0], [1]])
+        u = float(a_des.T @ R_curr @ e3)
+        return [u]
 
     def compute_orientation(self, a_des, yaw_ref):
         """ Calculates the desired orientation
@@ -88,9 +88,13 @@ class QuadrotorPositionControllerPD:
             R_des: 3x3 numpy matrix representing desired orientation
         """
 
-        # TODO: Assignment 1, Problem 2.2
+        z_B = a_des / norm(a_des)
+        x_C = np.array([[cos(yaw_ref)], [sin(yaw_ref)], [0]])
+        y_B_raw = np.cross(z_B, x_C, axis=0)
+        y_B = y_B_raw / norm(y_B_raw)
+        x_B = np.cross(y_B, z_B, axis=0)
 
-        R_des = np.eye(3)
+        R_des = np.hstack([x_B, y_B, z_B])
         return R_des
 
     def compute_hod_refs(self, acc_vec_des, flat_ref, R_des):
@@ -106,10 +110,57 @@ class QuadrotorPositionControllerPD:
             angacc_des: 3x1 numpy array representing desired angular acceleration
         """
 
-        # TODO: Assignment 1, Problem 2.3
+        x_B = R_des[:, 0:1]
+        y_B = R_des[:, 1:2]
+        z_B = R_des[:, 2:3]
 
-        angvel_des = np.zeros((3, 1))
-        angacc_des = np.zeros((3, 1))
+        jerk = flat_ref.jerk
+        snap = flat_ref.snap
+        yaw = flat_ref.yaw
+        dyaw = flat_ref.dyaw
+        d2yaw = flat_ref.d2yaw
+
+        x_C = np.array([[cos(yaw)], [sin(yaw)], [0]])
+        y_C = np.array([[-sin(yaw)], [cos(yaw)], [0]])
+
+        T = norm(acc_vec_des)
+        Tdot = float(z_B.T @ jerk)
+
+        h_w = (1.0 / T) * (jerk - Tdot * z_B)
+
+        n = np.cross(z_B, x_C, axis=0)
+        k = norm(n)
+        n_dot = np.cross(h_w, x_C, axis=0) + dyaw * np.cross(z_B, y_C, axis=0)
+        k_dot = float(y_B.T @ n_dot)
+        dy_B = (n_dot - k_dot * y_B) / k
+
+        dx_B = np.cross(dy_B, z_B, axis=0) + np.cross(y_B, h_w, axis=0)
+
+        dR = np.hstack([dx_B, dy_B, h_w])
+        Omega = R_des.T @ dR
+        angvel_des = np.array([[Omega[2, 1]], [Omega[0, 2]], [Omega[1, 0]]])
+
+        Tddot = float(h_w.T @ jerk) + float(z_B.T @ snap)
+        h_alpha = (1.0 / T) * (snap - Tddot * z_B - 2.0 * Tdot * h_w)
+
+        n_ddot = (np.cross(h_alpha, x_C, axis=0)
+                  + 2.0 * dyaw * np.cross(h_w, y_C, axis=0)
+                  + d2yaw * np.cross(z_B, y_C, axis=0)
+                  - dyaw**2 * np.cross(z_B, x_C, axis=0))
+
+        k_ddot = float(dy_B.T @ n_dot) + float(y_B.T @ n_ddot)
+        d2y_B = (n_ddot - k_ddot * y_B - 2.0 * k_dot * dy_B) / k
+
+        d2x_B = (np.cross(d2y_B, z_B, axis=0)
+                 + 2.0 * np.cross(dy_B, h_w, axis=0)
+                 + np.cross(y_B, h_alpha, axis=0))
+
+        d2R = np.hstack([d2x_B, d2y_B, h_alpha])
+        M = R_des.T @ d2R
+        angacc_des = np.array([[(M[2, 1] - M[1, 2]) / 2.0],
+                               [(M[0, 2] - M[2, 0]) / 2.0],
+                               [(M[1, 0] - M[0, 1]) / 2.0]])
+
         return (angvel_des, angacc_des)
 
     def compute_command(self):
@@ -122,8 +173,18 @@ class QuadrotorPositionControllerPD:
                 4. Calculates the desired angular velocities and accelerations.
         """
 
-        # TODO: Assignment 1, Problem 2.4
-        pass
+        e_pos = self.current_state.pos - self.state_ref.pos
+        e_vel = self.current_state.vel - self.state_ref.vel
+
+        a_des = (self.state_ref.acc
+                 + self.gravity_norm * self.zw
+                 - self._Kx @ e_pos
+                 - self._Kv @ e_vel)
+
+        self.Rdes = self.compute_orientation(a_des, self.state_ref.yaw)
+        self.accel_des = self.compute_body_z_accel(a_des, self.Rcurr)[0]
+        self.angvel_des, self.angacc_des = self.compute_hod_refs(
+            a_des, self.state_ref, self.Rdes)
 
     def get_cascaded_command(self):
         casc_cmd = CascadedCommand()
