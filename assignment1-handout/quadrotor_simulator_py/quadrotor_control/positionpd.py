@@ -73,6 +73,9 @@ class QuadrotorPositionControllerPD:
             u: scalar value representing body-frame z-acceleration
         """
 
+        # Project desired acceleration onto the CURRENT body z-axis.
+        # This gives the mass-normalized thrust: c = a_des . (R * e3)
+        # It uses R_curr (not R_des) so the thrust accounts for the actual tilt.
         e3 = np.array([[0], [0], [1]])
         u = float(a_des.T @ R_curr @ e3)
         return [u]
@@ -88,11 +91,16 @@ class QuadrotorPositionControllerPD:
             R_des: 3x3 numpy matrix representing desired orientation
         """
 
+        # ZYX convention (Daoud Eq 4-6): build R_des from thrust direction + yaw.
+        #   z_B = a_des / ||a_des||                (thrust direction)
+        #   y_c = [-sin(psi), cos(psi), 0]         (heading perpendicular)
+        #   x_B = (y_c x z_B) / ||y_c x z_B||     (body x from cross product)
+        #   y_B = z_B x x_B                        (completes right-handed frame)
         z_B = a_des / norm(a_des)
-        x_C = np.array([[cos(yaw_ref)], [sin(yaw_ref)], [0]])
-        y_B_raw = np.cross(z_B, x_C, axis=0)
-        y_B = y_B_raw / norm(y_B_raw)
-        x_B = np.cross(y_B, z_B, axis=0)
+        yc = np.array([[-sin(yaw_ref)], [cos(yaw_ref)], [0]])
+        x_B_raw = np.cross(yc, z_B, axis=0)
+        x_B = x_B_raw / norm(x_B_raw)
+        y_B = np.cross(z_B, x_B, axis=0)
 
         R_des = np.hstack([x_B, y_B, z_B])
         return R_des
@@ -114,52 +122,70 @@ class QuadrotorPositionControllerPD:
         y_B = R_des[:, 1:2]
         z_B = R_des[:, 2:3]
 
-        jerk = flat_ref.jerk
-        snap = flat_ref.snap
+        j = flat_ref.jerk
+        s = flat_ref.snap
         yaw = flat_ref.yaw
         dyaw = flat_ref.dyaw
         d2yaw = flat_ref.d2yaw
 
-        x_C = np.array([[cos(yaw)], [sin(yaw)], [0]])
-        y_C = np.array([[-sin(yaw)], [cos(yaw)], [0]])
+        # Heading vectors in world frame (xc points along yaw, yc perpendicular)
+        xc = np.array([[cos(yaw)], [sin(yaw)], [0]])
+        yc = np.array([[-sin(yaw)], [cos(yaw)], [0]])
 
-        T = norm(acc_vec_des)
-        Tdot = float(z_B.T @ jerk)
+        # c = ||a_des|| is the mass-normalized thrust magnitude.
+        # c_dot = z_B^T * jerk is its time derivative (Daoud Eq 11).
+        c = norm(acc_vec_des)
+        c_dot = float(z_B.T @ j)
 
-        h_w = (1.0 / T) * (jerk - Tdot * z_B)
+        # Angular velocities from differential flatness (Daoud Sec VI-B).
+        # These come from projecting jerk onto body axes and dividing by thrust:
+        #   omega_x = -(y_B . j) / c    (roll rate from lateral jerk)
+        #   omega_y =  (x_B . j) / c    (pitch rate from forward jerk)
+        omega_x = float(-y_B.T @ j) / c
+        omega_y = float(x_B.T @ j) / c
 
-        n = np.cross(z_B, x_C, axis=0)
-        k = norm(n)
-        n_dot = np.cross(h_w, x_C, axis=0) + dyaw * np.cross(z_B, y_C, axis=0)
-        k_dot = float(y_B.T @ n_dot)
-        dy_B = (n_dot - k_dot * y_B) / k
+        # omega_z has a CRITICAL coupling term (Daoud Eq 22):
+        #   omega_z = (psi_dot * xc.xB + omega_y * yc.zB) / ||yc x zB||
+        # The second term (omega_y * yc.zB) is nonzero even when psi_dot=0.
+        # It captures how pitch rate changes the heading when the body is tilted.
+        k_yc = norm(np.cross(yc, z_B, axis=0))
+        xc_xB = float(xc.T @ x_B)
+        yc_zB = float(yc.T @ z_B)
+        omega_z = (dyaw * xc_xB + omega_y * yc_zB) / k_yc
 
-        dx_B = np.cross(dy_B, z_B, axis=0) + np.cross(y_B, h_w, axis=0)
+        angvel_des = np.array([[omega_x], [omega_y], [omega_z]])
 
-        dR = np.hstack([dx_B, dy_B, h_w])
-        Omega = R_des.T @ dR
-        angvel_des = np.array([[Omega[2, 1]], [Omega[0, 2]], [Omega[1, 0]]])
+        # Angular accelerations from snap (Daoud Sec VI-C).
+        # Derived by differentiating the jerk equation s = c_ddot*zB + 2*c_dot*zB_dot + c*zB_ddot
+        # and projecting onto body axes:
+        #   alpha_y = (xB.s - 2*c_dot*wy - c*wx*wz) / c
+        #   alpha_x = (-yB.s - 2*c_dot*wx + c*wy*wz) / c
+        # The cross-terms (wx*wz, wy*wz) arise from centripetal coupling in the rotating frame.
+        x_B_s = float(x_B.T @ s)
+        y_B_s = float(y_B.T @ s)
 
-        Tddot = float(h_w.T @ jerk) + float(z_B.T @ snap)
-        h_alpha = (1.0 / T) * (snap - Tddot * z_B - 2.0 * Tdot * h_w)
+        alpha_y = (x_B_s - 2.0 * c_dot * omega_y
+                   - c * omega_x * omega_z) / c
+        alpha_x = (-y_B_s - 2.0 * c_dot * omega_x
+                   + c * omega_y * omega_z) / c
 
-        n_ddot = (np.cross(h_alpha, x_C, axis=0)
-                  + 2.0 * dyaw * np.cross(h_w, y_C, axis=0)
-                  + d2yaw * np.cross(z_B, y_C, axis=0)
-                  - dyaw**2 * np.cross(z_B, x_C, axis=0))
+        # alpha_z (Daoud final formula, derived from differentiating Eq 22).
+        # Includes yaw acceleration, yaw-rate couplings, and tilt-yaw couplings
+        # (alpha_y * yc.zB and -wx*wy * yc.yB terms are nonzero even at zero yaw rate).
+        xc_yB = float(xc.T @ y_B)
+        xc_zB = float(xc.T @ z_B)
+        yc_yB = float(yc.T @ y_B)
 
-        k_ddot = float(dy_B.T @ n_dot) + float(y_B.T @ n_ddot)
-        d2y_B = (n_ddot - k_ddot * y_B - 2.0 * k_dot * dy_B) / k
+        alpha_z = (1.0 / k_yc) * (
+            d2yaw * xc_xB
+            + dyaw * omega_z * xc_yB
+            - 2.0 * dyaw * omega_y * xc_zB
+            + alpha_y * yc_zB
+            - omega_x * omega_y * yc_yB
+            - omega_z * (-dyaw * xc_yB + omega_x * yc_zB)
+        )
 
-        d2x_B = (np.cross(d2y_B, z_B, axis=0)
-                 + 2.0 * np.cross(dy_B, h_w, axis=0)
-                 + np.cross(y_B, h_alpha, axis=0))
-
-        d2R = np.hstack([d2x_B, d2y_B, h_alpha])
-        M = R_des.T @ d2R
-        angacc_des = np.array([[(M[2, 1] - M[1, 2]) / 2.0],
-                               [(M[0, 2] - M[2, 0]) / 2.0],
-                               [(M[1, 0] - M[0, 1]) / 2.0]])
+        angacc_des = np.array([[alpha_x], [alpha_y], [alpha_z]])
 
         return (angvel_des, angacc_des)
 
@@ -173,6 +199,9 @@ class QuadrotorPositionControllerPD:
                 4. Calculates the desired angular velocities and accelerations.
         """
 
+        # PD position control: desired acceleration = feedforward + gravity comp + PD feedback.
+        # a_des = a_ref + g*e3 - Kp*(p - p_ref) - Kd*(v - v_ref)
+        # This vector points in the direction the thrust should act (includes gravity).
         e_pos = self.current_state.pos - self.state_ref.pos
         e_vel = self.current_state.vel - self.state_ref.vel
 

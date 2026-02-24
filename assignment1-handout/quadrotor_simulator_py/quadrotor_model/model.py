@@ -182,6 +182,8 @@ class QuadrotorModel:
             M: 3x1 numpy array representing torques
         """
 
+        # Motor model: force_i = cT2 * rpm_i^2 + cT1 * rpm_i + cT0
+        # This quadratic maps each rotor's RPM to the thrust it produces.
         cT2 = self.model_params.motor_model[0, 0]
         cT1 = self.model_params.motor_model[1, 0]
         cT0 = self.model_params.motor_model[2, 0]
@@ -190,6 +192,7 @@ class QuadrotorModel:
         for i in range(4):
             rotor_forces[i, 0] = cT2 * rpms[i]**2 + cT1 * rpms[i] + cT0
 
+        # Mixer converts [f1,f2,f3,f4] -> [total_thrust, tau_x, tau_y, tau_z]
         wrench = self.model_params.mixer @ rotor_forces
         F = wrench[0, 0]
         M = wrench[1:4]
@@ -208,6 +211,10 @@ class QuadrotorModel:
             dq: 4x1 numpy array representing the derivative of the quaternion
         """
 
+        # Quaternion derivative: dq/dt = (1/2) * Omega(w) * q
+        # where Omega is the 4x4 skew-like matrix built from body angular velocity.
+        # q = [w, x, y, z] convention. Uses the RAW (unnormalized) quaternion
+        # so the ODE integrator's state stays consistent (normalize only for rotation matrix).
         wx = wb[0, 0]
         wy = wb[1, 0]
         wz = wb[2, 0]
@@ -241,6 +248,12 @@ class QuadrotorModel:
             lin_acc: 3x1 numpy array representing linear acceleration
         """
 
+        # Mellinger Eq 4.2: world-frame linear acceleration with CG offset.
+        #   a_w = -g*e3 + (F/m)*R*e3 + R*(r_off x alpha) + R*(w x (w x r_off))
+        # Term 1: gravity pointing down
+        # Term 2: thrust along body z, rotated to world
+        # Term 3: tangential acceleration from angular acceleration at CG offset
+        # Term 4: centripetal acceleration from angular velocity at CG offset
         g = model.gravity_norm
         m = model.mass
         r_off = np.reshape(model.cg_offset, (3, 1))
@@ -272,6 +285,12 @@ class QuadrotorModel:
             ang acc: 3x1 numpy array representing angular acceleration
         """
 
+        # Mellinger Eq 4.3: body-frame angular acceleration with CG offset.
+        #   alpha = I^{-1} * (M - w x Iw - w x (r_off x F) + r_off x m*g*e3)
+        # Term 1: applied torques from rotors
+        # Term 2: gyroscopic / Coriolis torque
+        # Term 3: torque from thrust acting at offset CG
+        # Term 4: gravity torque from offset CG
         I = model.inertia
         I_inv = model.inertia_inv
         r_off = np.reshape(model.cg_offset, (3, 1))
@@ -317,14 +336,18 @@ class QuadrotorModel:
         wb = np.reshape(x[10:13], (3, 1))
         rpms = x[13:17]
 
-        qn_raw = Quaternion(quat)
-        qn_norm = Quaternion(quat).normalize()
-        Rwb = Rot3.from_quat(qn_norm).R
+        # Normalize quaternion to prevent drift during integration.
+        # Use the same normalized quaternion for both R and dq/dt.
+        qn = Quaternion(quat).normalize()
+        Rwb = Rot3.from_quat(qn).R
 
+        # First-order motor dynamics: drpm/dt = k_motor * (rpm_cmd - rpm_current)
         kmotor = self.model_params.kmotor_u
         uRPM = np.reshape(self.model_params.uRPM, (4,))
         drpm = kmotor * (uRPM - rpms)
 
+        # When rotor inertia is disabled, motors respond instantly:
+        # use the commanded RPMs directly for force/torque calculation.
         if self.enable_rotor_inertia:
             rpms_for_force = rpms
         else:
@@ -340,7 +363,7 @@ class QuadrotorModel:
         aw = self.calculate_world_frame_linear_acceleration(
             self.model_params, ang_acc, wb, Rwb, F)
 
-        dq = self.quaternion_derivative(qn_raw, wb)
+        dq = self.quaternion_derivative(qn, wb)
 
         self.model_params.aw = aw
         self.model_params.ang_acc = ang_acc

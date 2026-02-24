@@ -46,6 +46,12 @@ class QuadMixer:
         k = self.mscale
         a = self.ms_angle
 
+        # Mixer maps individual rotor forces [f1,f2,f3,f4] to [thrust, tau_x, tau_y, tau_z].
+        # QuadX layout with motor_spread_angle a (pi/4 for standard X config):
+        #   Row 0: total thrust = sum of all rotor forces
+        #   Row 1: roll torque  = moment arm L*sin(a) with alternating signs per arm
+        #   Row 2: pitch torque = moment arm L*cos(a) with alternating signs per arm
+        #   Row 3: yaw torque   = reaction torques scaled by moment_scale k
         self.mixer = np.array([
             [1.0,          1.0,          1.0,          1.0         ],
             [-L*np.sin(a), L*np.sin(a),  L*np.sin(a), -L*np.sin(a)],

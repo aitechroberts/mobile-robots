@@ -118,9 +118,10 @@ class QuadrotorAttitudeControllerPD:
             rotor_forces: 4x1 numpy matrix representing rotor forces
         """
 
-        # TODO: Assignment 1, Problem 3.1
-
-        rotor_forces = np.zeros((4, 1))
+        # The mixer maps rotor forces -> [thrust; torques]. Its inverse does the reverse:
+        # given a desired thrust and 3-axis torque, solve for individual rotor forces.
+        wrench = np.vstack([np.array([[thrust]]), torque])
+        rotor_forces = self.mixer_inv @ wrench
         return rotor_forces
 
     def force_to_rpm(self, forces):
@@ -134,9 +135,18 @@ class QuadrotorAttitudeControllerPD:
             uW: 4x1 numpy matrix representing RPMs
         """
 
-        # TODO: Assignment 1, Problem 3.2
-
+        # Invert the motor model: f = cT2*rpm^2 + cT1*rpm + cT0
+        # Rearrange to: cT2*rpm^2 + cT1*rpm + (cT0 - f) = 0
+        # Solve with the quadratic formula, taking the positive root.
         uW = np.zeros((4, 1))
+        for i in range(4):
+            a = self.cT2
+            b = self.cT1
+            c = self.cT0 - forces[i, 0]
+            disc = b**2 - 4.0 * a * c
+            if disc < 0:
+                disc = 0.0
+            uW[i, 0] = (-b + np.sqrt(disc)) / (2.0 * a)
         return uW
 
     def saturate_rpm(self, rpm_in):
@@ -161,6 +171,34 @@ class QuadrotorAttitudeControllerPD:
             sat_rpms: 4x1 numpy matrix representing saturated RPMs
         """
 
-        # TODO: Assignment 1, Problem 3.3
+        R = self.current_state.rot
+        R_des = self.des_rot
+        omega = np.reshape(self.current_state.angvel, (3, 1))
+        omega_des = np.reshape(self.des_angvel, (3, 1))
+        angacc_des = np.reshape(self.des_angacc, (3, 1))
 
-        return np.zeros((4, 1))
+        # 1. Rotation error (Mellinger p.21): measures how far R is from R_des.
+        #    eR = (1/2) * vee(R_d^T R - R^T R_d)
+        #    The vee map extracts [a,b,c] from a skew-symmetric matrix.
+        #    eR -> 0 when R = R_des. Sign convention: positive error -> negative correction.
+        err_mat = R_des.T @ R - R.T @ R_des
+        eR = 0.5 * np.array([[err_mat[2, 1]], [err_mat[0, 2]], [err_mat[1, 0]]])
+
+        # 2. Angular velocity error: map omega_des from desired body frame to current body frame
+        #    via R^T R_d, then subtract from current omega.
+        eOm = omega - R.T @ R_des @ omega_des
+
+        # 3. Desired angular acceleration with PD feedback (Spitzer Eq 2.68):
+        #    alpha_cmd = alpha_ff - kR * eR - kOm * eOm
+        #    Then the desired moments come from Euler's equation:
+        #    M = I * alpha_cmd + omega x (I * omega)
+        #    The cross-product term compensates for gyroscopic precession.
+        alpha_cmd = angacc_des - self.kR * eR - self.kOm * eOm
+        M = self.inertia @ alpha_cmd + np.cross(omega, self.inertia @ omega, axis=0)
+
+        # 4-6. Convert desired wrench to individual rotor RPMs, then saturate.
+        rotor_forces = self.wrench_to_rotor_forces(self.thrust_des, M)
+        rpms = self.force_to_rpm(rotor_forces)
+        sat_rpms = self.saturate_rpm(rpms)
+
+        return sat_rpms

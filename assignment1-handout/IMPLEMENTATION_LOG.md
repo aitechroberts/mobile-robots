@@ -114,6 +114,20 @@ Faessler Eq (33)-(36): construct R_des from desired acceleration and yaw referen
 - **Also fixed h_alpha:** Corrected `Tddot = h_w · jerk + z_B · snap`
   (was incorrectly using `||h_w||^2 * a_des`)
 
+**Second rewrite (CURRENT): Direct PDF closed-form formulas.**
+- Replaced the dR/dt kinematic approach with the closed-form equations from
+  Daoud/Goel/Tabib "Differential Flatness of Quadrotor Dynamics under General
+  Conditions using the ZYX Euler Convention":
+  - ωx = -y_B^T j / c, ωy = x_B^T j / c (PDF Sec VI-B)
+  - ωz = (ψ̇ x_c^T x_B + ωy y_c^T z_B) / ||y_c × z_B|| (Eq 22)
+  - αy = (x_B^T s - 2ċωy - cωxωz) / c (PDF after Eq 24)
+  - αx = (-y_B^T s - 2ċωx + cωyωz) / c (PDF after Eq 24)
+  - αz = full formula with all coupling terms (PDF final Eq)
+- The dR/dt approach had numerical instability from chaining d²R/dt²
+  through multiple derivative levels. The PDF formulas avoid this by
+  using algebraic projections (dot products with body/heading vectors)
+  instead of computing second derivatives of rotation matrix columns.
+
 ### 2.4 `compute_command` (positionpd.py)
 PD feedback + feedforward + gravity:
 `a_des = acc_ref + g*e3 - Kx*e_pos - Kv*e_vel`
@@ -123,4 +137,21 @@ Then calls compute_orientation, compute_body_z_accel, compute_hod_refs.
 
 ## Q3: Attitude Controller
 
-*(not yet implemented)*
+### 3.1 `wrench_to_rotor_forces` (attitudepd.py)
+Stack thrust and torque into 4x1 wrench vector, apply `mixer_inv`:
+`rotor_forces = mixer_inv @ [thrust; torque]`
+
+### 3.2 `force_to_rpm` (attitudepd.py)
+Solve `f = cT2*rpm^2 + cT1*rpm + cT0` using the quadratic formula:
+`rpm = (-cT1 + sqrt(cT1^2 - 4*cT2*(cT0 - f))) / (2*cT2)`
+Takes the positive root; clamps discriminant to 0 if negative.
+
+### 3.3 `run_ctrl` (attitudepd.py)
+Full attitude PD control loop:
+1. Rotation error (Mellinger p.21): `eR = (1/2) vee(R_d^T R - R^T R_d)`
+2. Angular velocity error: `eΩ = ω - R^T R_d ω_d`
+3. PD + feedforward angular acceleration: `α_cmd = α_des - kR*eR - kΩ*eΩ`
+4. Desired moments (Spitzer Eq 2.68 x inertia): `M = I α_cmd + ω × Iω`
+5. Rotor forces via inverse mixer
+6. RPMs via quadratic formula
+7. Saturated RPMs via min/max clipping
