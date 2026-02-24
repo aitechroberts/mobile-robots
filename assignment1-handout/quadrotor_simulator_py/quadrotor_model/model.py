@@ -342,17 +342,18 @@ class QuadrotorModel:
         qn = Quaternion(quat).normalize()
         Rwb = Rot3.from_quat(qn).R
 
-        # First-order motor dynamics: drpm/dt = k_motor * (rpm_cmd - rpm_current)
+        # First-order motor dynamics
         kmotor = self.model_params.kmotor_u
         uRPM = np.reshape(self.model_params.uRPM, (4,))
-        drpm = kmotor * (uRPM - rpms)
 
-        # When rotor inertia is disabled, motors respond instantly:
-        # use the commanded RPMs directly for force/torque calculation.
+        # When rotor inertia is disabled, RPMs are instantly achieved.
+        # Zero out the derivative to eliminate stiffness from the ODE solver.
         if self.enable_rotor_inertia:
             rpms_for_force = rpms
+            drpm = kmotor * (uRPM - rpms)
         else:
             rpms_for_force = uRPM
+            drpm = np.zeros(4)
 
         F, M = self.calculate_force_and_torque_from_rpm(rpms_for_force)
 
