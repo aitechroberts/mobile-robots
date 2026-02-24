@@ -336,8 +336,9 @@ class QuadrotorModel:
         wb = np.reshape(x[10:13], (3, 1))
         rpms = x[13:17]
 
-        # Normalize quaternion to prevent drift during integration.
-        # Use the same normalized quaternion for both R and dq/dt.
+        # Raw quaternion for the derivative (dq/dt is proportional to ||q||).
+        # Normalized quaternion only for building the rotation matrix.
+        q_raw = Quaternion(quat)
         qn = Quaternion(quat).normalize()
         Rwb = Rot3.from_quat(qn).R
 
@@ -363,7 +364,7 @@ class QuadrotorModel:
         aw = self.calculate_world_frame_linear_acceleration(
             self.model_params, ang_acc, wb, Rwb, F)
 
-        dq = self.quaternion_derivative(qn, wb)
+        dq = self.quaternion_derivative(q_raw, wb)
 
         self.model_params.aw = aw
         self.model_params.ang_acc = ang_acc

@@ -100,7 +100,8 @@ class QuadrotorPositionControllerPD:
         yc = np.array([[-sin(yaw_ref)], [cos(yaw_ref)], [0]])
         x_B_raw = np.cross(yc, z_B, axis=0)
         x_B = x_B_raw / norm(x_B_raw)
-        y_B = np.cross(z_B, x_B, axis=0)
+        y_B_raw = np.cross(z_B, x_B, axis=0)
+        y_B = y_B_raw / norm(y_B_raw)
 
         R_des = np.hstack([x_B, y_B, z_B])
         return R_des
