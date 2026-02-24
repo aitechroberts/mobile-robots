@@ -398,7 +398,8 @@ class QuadrotorModel:
         ss[10:13] = np.transpose(self.wb).flatten()
         ss[13:17] = np.transpose(self.rs).flatten()
 
-        sol = integrate.solve_ivp(self.ode_step, t_span, ss)
+        # FIX 1: Tighten tolerances to eliminate step-boundary truncation drift
+        sol = integrate.solve_ivp(self.ode_step, t_span, ss, rtol=1e-6, atol=1e-8)
         self.time = tstop
 
         ss = sol.y[:, -1]
@@ -410,6 +411,10 @@ class QuadrotorModel:
             self.rs = ss[13:17]
         else:
             self.rs = self.model_params.uRPM
+
+        # FIX 2: Re-evaluate the derivative at the exact final state
+        # to overwrite the intermediate Runge-Kutta side-effects
+        _ = self.ode_step(tstop, ss)
 
         self.aw = self.model_params.aw
         self.ang_acc = self.model_params.ang_acc
