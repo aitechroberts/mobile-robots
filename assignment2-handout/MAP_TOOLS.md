@@ -144,6 +144,33 @@ contract is handled once at the conversion boundary. Downstream code like
 logic, so when the helpers produce the right types, everything just works
 without ad-hoc casts scattered through the codebase.
 
+### numpy version constraint
+
+The provided `get_raycells` voxel traversal relies on `np.uint64` wrapping
+behavior when a ray steps backward past the grid boundary. For example, when
+`c.row` is `np.uint64(0)` and `step_row` is the Python int `-1`:
+
+```
+c.row = np.uint64(c.row) + step_row
+```
+
+In **numpy <= 1.24**, this silently wraps to `np.uint64(18446744073709551615)`,
+which `cell_in_grid` catches on the next loop iteration to terminate the
+traversal cleanly.
+
+In **numpy >= 2.0**, this raises `OverflowError: Python integer -1 out of
+bounds for uint64`. The newer numpy no longer permits adding a negative Python
+`int` to a `uint64`.
+
+Note that the inconsistency exists in the provided code: `step_row` is
+explicitly cast to `np.float64` when computing `tdelta` (e.g.,
+`self.resolution * np.float64(step_row) * ...`) but is left as a bare Python
+`int` in the stepping line. This only manifests as an error on numpy 2.x.
+
+The assignment was written for Python 3.8, which is compatible with numpy up to
+**1.24.4** (Python 3.8 support was dropped in numpy 1.25). Using numpy 1.24.x
+ensures the wrapping behavior works as intended.
+
 **Verification against test data:**
 - `Cell(0, 14, 44)` --> `Point(-35 + 14*0.5, -35 + 0*0.5, -2 + 44*0.5)`
   = `Point(-28.0, -35.0, 20.0)`

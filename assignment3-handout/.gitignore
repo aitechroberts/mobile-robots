@@ -1,0 +1,6 @@
+quadrotor_model
+quadrotor_control
+utils
+.vscode
+**/__pycache__
+**/*.pyc

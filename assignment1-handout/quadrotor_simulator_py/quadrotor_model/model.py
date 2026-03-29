@@ -298,10 +298,15 @@ class QuadrotorModel:
         moments = np.reshape(moments, (3, 1))
         Fdes = np.reshape(Fdes, (3, 1))
 
+        # Rotate gravity into body frame so it's in the same frame as r_off
+        R_curr = self.get_pose().get_so3()
+        gravity_world = np.array([[0], [0], [model.mass * model.gravity_norm]])
+        gravity_body = R_curr.T @ gravity_world
+
         ang_acc = I_inv @ (moments
                            - np.cross(wb, I @ wb, axis=0)
                            - np.cross(wb, np.cross(r_off, Fdes, axis=0), axis=0)
-                           + np.cross(r_off, np.array([[0], [0], [model.mass * model.gravity_norm]]), axis=0))
+                           + np.cross(r_off, gravity_body, axis=0))
 
         return ang_acc
 
@@ -336,27 +341,19 @@ class QuadrotorModel:
         wb = np.reshape(x[10:13], (3, 1))
         rpms = x[13:17]
 
-        # Raw quaternion for the derivative (dq/dt is proportional to ||q||).
-        # Normalized quaternion only for building the rotation matrix.
-        q_raw = Quaternion(quat)
         qn = Quaternion(quat).normalize()
         Rwb = Rot3.from_quat(qn).R
 
         # First-order motor dynamics
         kmotor = self.model_params.kmotor_u
-        uRPM = np.reshape(self.model_params.uRPM, (4,))
+        uRPM_raw = np.reshape(self.model_params.uRPM, (4,))
 
-        # When rotor inertia is disabled, RPMs are instantly achieved.
-        # Zero out the derivative to eliminate stiffness from the ODE solver.
-        if self.enable_rotor_inertia:
-            rpms_for_force = rpms
-            drpm = kmotor * (uRPM - rpms)
-        else:
-            rpms_for_force = uRPM
-            drpm = np.zeros(4)
+        # Pure first-order motor dynamics. No clipping inside the ODE!
+        kmotor = self.model_params.kmotor_u
+        uRPM_raw = np.reshape(self.model_params.uRPM, (4,))
+        drpm = (uRPM_raw - rpms) / kmotor
 
-        F, M = self.calculate_force_and_torque_from_rpm(rpms_for_force)
-
+        F, M = self.calculate_force_and_torque_from_rpm(rpms)
         Fdes = np.array([[0], [0], [F]])
 
         ang_acc = self.calculate_angular_acceleration(
@@ -365,7 +362,7 @@ class QuadrotorModel:
         aw = self.calculate_world_frame_linear_acceleration(
             self.model_params, ang_acc, wb, Rwb, F)
 
-        dq = self.quaternion_derivative(q_raw, wb)
+        dq = self.quaternion_derivative(qn, wb)
 
         self.model_params.aw = aw
         self.model_params.ang_acc = ang_acc
@@ -380,10 +377,7 @@ class QuadrotorModel:
         return xdot
 
     def _saturate_rpms(self, p, rpm_in):
-        rpms = np.zeros((4, 1))
-        for i in range(0, 4):
-            rpms[i] = np.max(np.min(rpm_in[0], p.max), p.min)
-        return rpms
+        return np.clip(rpm_in, p.min, p.max)
 
     def update(self, t):
 
@@ -399,22 +393,23 @@ class QuadrotorModel:
         ss[10:13] = np.transpose(self.wb).flatten()
         ss[13:17] = np.transpose(self.rs).flatten()
 
-        # FIX 1: Tighten tolerances to eliminate step-boundary truncation drift
-        sol = integrate.solve_ivp(self.ode_step, t_span, ss, rtol=1e-6, atol=1e-8)
+        sol = integrate.solve_ivp(self.ode_step, t_span, ss)
         self.time = tstop
 
         ss = sol.y[:, -1]
         self.set_pose(ss[0:7])
-        self.vw = ss[7:10]
-        self.wb = ss[10:13]
+
+        # Enforce strict column vector shapes so numpy broadcasting doesn't break later dot products
+        self.vw = np.reshape(ss[7:10], (3, 1))
+        self.wb = np.reshape(ss[10:13], (3, 1))
 
         if self.enable_rotor_inertia:
-            self.rs = ss[13:17]
+            self.rs = np.reshape(ss[13:17], (4, 1))
         else:
             self.rs = self.model_params.uRPM
 
-        # FIX 2: Re-evaluate the derivative at the exact final state
-        # to overwrite the intermediate Runge-Kutta side-effects
+        # Re-evaluate the derivative at the exact final state
+        # Lock in the final state side-effects
         _ = self.ode_step(tstop, ss)
 
         self.aw = self.model_params.aw

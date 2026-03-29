@@ -16,5 +16,5 @@ def normalize(x):
 def shortest_angular_distance(a0, a1):
     result = unroll(unroll(a0) - unroll(a1))
     if result > math.pi:
-        result -= 2*math.pi - result
+        result -= 2*math.pi
     return normalize(result)
